@@ -1,0 +1,27 @@
+# Ignore local environment overrides & credentials
+deploy/config.env
+.env
+*.pem
+*.key
+client_secret*.json
+oauth_config.json
+**/oauth_config.json
+
+# Build artifacts, Python bytecode & virtual environments
+dist/
+**/dist/
+build/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# OS metadata
+.DS_Store
+
+# Explicitly keep synthetic data and schemas in Git so anyone cloning the repo has them ready
+!data/weekly_store_sales.csv
+!data/weekly_store_sales.jsonl
+!data/weekly_store_sales_schema.json

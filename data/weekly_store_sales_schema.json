@@ -1,0 +1,128 @@
+[
+  {
+    "name": "record_id",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "Unique weekly store record identifier"
+  },
+  {
+    "name": "week_start_date",
+    "type": "DATE",
+    "mode": "REQUIRED",
+    "description": "Monday start date of the retail sales week"
+  },
+  {
+    "name": "region",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "Geographic sales region (North, South, West) used for Row-Level Security (RLS)"
+  },
+  {
+    "name": "store_id",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "Store identifier code"
+  },
+  {
+    "name": "store_name",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "Retail store display name"
+  },
+  {
+    "name": "city",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "Store city"
+  },
+  {
+    "name": "state",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "Store two-letter state code"
+  },
+  {
+    "name": "store_manager",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "Store general manager full name"
+  },
+  {
+    "name": "top_category",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "Highest-volume product category in the region"
+  },
+  {
+    "name": "active_promo",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "Active promotional campaign code"
+  },
+  {
+    "name": "foot_traffic",
+    "type": "INT64",
+    "mode": "REQUIRED",
+    "description": "Weekly store visitor count"
+  },
+  {
+    "name": "units_sold",
+    "type": "INT64",
+    "mode": "REQUIRED",
+    "description": "Total retail units sold during the week"
+  },
+  {
+    "name": "gross_revenue_usd",
+    "type": "FLOAT64",
+    "mode": "REQUIRED",
+    "description": "Gross retail revenue before promotional discounts (USD)"
+  },
+  {
+    "name": "discount_usd",
+    "type": "FLOAT64",
+    "mode": "REQUIRED",
+    "description": "Total promotional markdowns and discounts applied (USD)"
+  },
+  {
+    "name": "net_revenue_usd",
+    "type": "FLOAT64",
+    "mode": "REQUIRED",
+    "description": "Net realized revenue after discounts (USD)"
+  },
+  {
+    "name": "weekly_target_usd",
+    "type": "FLOAT64",
+    "mode": "REQUIRED",
+    "description": "Weekly net revenue target assigned to the store (USD)"
+  },
+  {
+    "name": "target_attainment_pct",
+    "type": "FLOAT64",
+    "mode": "REQUIRED",
+    "description": "Net revenue as a percentage of weekly_target_usd"
+  },
+  {
+    "name": "gross_margin_pct",
+    "type": "FLOAT64",
+    "mode": "REQUIRED",
+    "description": "Realized gross margin percentage after product cost and promos"
+  },
+  {
+    "name": "return_rate_pct",
+    "type": "FLOAT64",
+    "mode": "REQUIRED",
+    "description": "Percentage of sold units returned by customers"
+  },
+  {
+    "name": "stockout_incidents",
+    "type": "INT64",
+    "mode": "REQUIRED",
+    "description": "Number of hero SKU out-of-stock events recorded during the week"
+  },
+  {
+    "name": "manager_weekly_note",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "Qualitative commentary from the store manager explaining weekly performance drivers"
+  }
+]
