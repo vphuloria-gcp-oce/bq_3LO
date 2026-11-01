@@ -485,6 +485,42 @@ def bind_agent_identity(
             print(f"⚠️ Warning setting Plane 1 IAM policy ({s_status}): {json.dumps(s_data)}")
     else:
         print(f"✅ Verified Plane 1 least-privilege IAM roles already bound to {principal}")
+
+    # Also ensure the 3LO Auth Provider ('bq-oauth-provider') is registered in IAM Auth Manager
+    # with --workload-ids bound to this SPIFFE principal so it appears in the Console Identity tab.
+    oauth_cfg_path = REPO_ROOT / "retail-sales-agent" / "app" / "oauth_config.json"
+    if oauth_cfg_path.exists():
+        try:
+            oauth_cfg = json.loads(oauth_cfg_path.read_text(encoding="utf-8"))
+            c_id = oauth_cfg.get("OAUTH_CLIENT_ID", "")
+            c_secret = oauth_cfg.get("OAUTH_CLIENT_SECRET", "")
+            if c_id and c_secret:
+                env = _gcloud_env()
+                env["CLOUDSDK_AUTH_ACCESS_TOKEN"] = token
+                for loc in ("global", region):
+                    check_url = f"https://agentidentity.googleapis.com/v1alpha/projects/{project_id}/locations/{loc}/authProviders/bq-oauth-provider"
+                    if api_request("GET", check_url, token, project_id)[0] != 200:
+                        subprocess.run(
+                            [
+                                "gcloud", "alpha", "agent-identity", "auth-providers", "create", "bq-oauth-provider",
+                                f"--location={loc}", f"--project={project_id}",
+                                "--description=BigQuery 3-Legged OAuth (3LO) Provider for Retail Sales Agent",
+                                "--three-legged-oauth-authorization-url=https://accounts.google.com/o/oauth2/v2/auth",
+                                "--three-legged-oauth-token-url=https://oauth2.googleapis.com/token",
+                                f"--three-legged-oauth-client-id={c_id}",
+                                f"--three-legged-oauth-client-secret={c_secret}",
+                                "--three-legged-oauth-enable-pkce",
+                                "--allowed-scopes=https://www.googleapis.com/auth/bigquery",
+                                f"--workload-ids={principal}",
+                            ],
+                            capture_output=True,
+                            text=True,
+                            env=env,
+                        )
+                print(f"✅ Registered 3LO Auth Provider 'bq-oauth-provider' on Agent Engine Identity tab for {principal}")
+        except Exception as exc:
+            print(f"⚠️ Warning registering Auth Provider in Agent Identity tab: {exc}")
+
     return principal
 
 
