@@ -25,3 +25,6 @@ venv/
 !data/weekly_store_sales.csv
 !data/weekly_store_sales.jsonl
 !data/weekly_store_sales_schema.json
+
+# Uncomment the line below before sharing/exporting the repository to external customers
+# docs-internal/
