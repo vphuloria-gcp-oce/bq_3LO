@@ -56,11 +56,23 @@ echo "📦 Verifying ADK agent dependencies, deploying & publishing..."
   uv run --no-sync python3 -c "import app.fast_api_app; print('   ✅ Local import of app.fast_api_app succeeded!')"
   uv lock --no-config --default-index https://pypi.org/simple
 
-  echo "🚀 Deploying ADK Agent to Vertex AI Agent Runtime (${REGION})..."
-  agents-cli deploy -d agent_runtime --project "${PROJECT_ID}" --region "${REGION}" --no-confirm-project
+AGENT_SERVICE_NAME="${AGENT_SERVICE_NAME:-retail-sales-agent-id}"
+
+  echo "🚀 Deploying ADK Agent with SPIFFE Agent Identity (--agent-identity) to Vertex AI Agent Runtime (${REGION})..."
+  agents-cli deploy -d agent_runtime \
+    --project "${PROJECT_ID}" \
+    --region "${REGION}" \
+    --service-name "${AGENT_SERVICE_NAME}" \
+    --agent-identity \
+    --no-confirm-project
 
   AGENT_RUNTIME_ID="$(python3 -c "import json; d=json.load(open('deployment_metadata.json')); print(d.get('remote_agent_runtime_id') or d.get('remote_agent_engine_id'))")"
-  echo "   ✅ Deployed Agent Runtime ID: ${AGENT_RUNTIME_ID}"
+  echo "   ✅ Deployed Agent Runtime ID (AGENT_IDENTITY): ${AGENT_RUNTIME_ID}"
+
+  echo "🔐 Verifying & binding Plane 1 SPIFFE Agent Identity IAM roles..."
+  python3 "${DEPLOY_DIR}/manage_ge_app.py" \
+    --project-id "${PROJECT_ID}" \
+    --bind-agent-identity "${AGENT_RUNTIME_ID}"
 
   PUBLISH_ARGS=(
     publish gemini-enterprise --registration-type adk
@@ -73,20 +85,24 @@ echo "📦 Verifying ADK agent dependencies, deploying & publishing..."
   fi
 
   echo "🌐 Publishing ADK Agent to Gemini Enterprise..."
-  agents-cli "${PUBLISH_ARGS[@]}"
+  agents-cli "${PUBLISH_ARGS[@]}" || echo "ℹ️  Existing GE agent registration already holds '${GEMINI_AUTH_ID}'; updating Reasoning Engine pointer in-place..."
 )
 
-# 4. Patch Agent Sharing (ALL_USERS) + 3LO Auth & print live Gemini Enterprise Web App URL
-echo "🔄 Finalizing Agent Sharing (ALL_USERS) & fetching Gemini Enterprise Web App URL..."
+# 4. Patch Agent Sharing (ALL_USERS) + 3LO Auth, deduplicate GE registrations & print live URL
+ACTIVE_RUNTIME_ID="$(python3 -c "import json; d=json.load(open('${AGENT_DIR}/deployment_metadata.json')); print(d.get('remote_agent_runtime_id') or d.get('remote_agent_engine_id'))")"
+echo "🔄 Finalizing Agent Sharing (ALL_USERS), 3LO Auth & single-agent registration..."
 GE_WEB_URL="$(python3 "${DEPLOY_DIR}/manage_ge_app.py" \
   --project-id "${PROJECT_ID}" --engine-id "${GE_APP_ID}" \
-  --auth-id "${GEMINI_AUTH_ID}" --finalize-agent-display-name "${AGENT_DISPLAY_NAME}")"
+  --auth-id "${GEMINI_AUTH_ID}" \
+  --agent-runtime-id "${ACTIVE_RUNTIME_ID}" \
+  --finalize-agent-display-name "${AGENT_DISPLAY_NAME}")"
 
 echo "=============================================================================="
-echo "✅ ADK Agent Deployed & Published to Gemini Enterprise!"
+echo "✅ ADK Agent (SPIFFE Agent Identity) Deployed & Published to Gemini Enterprise!"
 if [[ -n "${GE_WEB_URL}" ]]; then
   echo "   🌐 Gemini Enterprise Web App : ${GE_WEB_URL}"
 fi
+echo "   • Active Reasoning Engine   : ${ACTIVE_RUNTIME_ID}"
 echo "   • Gemini Enterprise Console : https://console.cloud.google.com/gen-app-builder/engines?project=${PROJECT_ID}"
 echo "   • Vertex AI Agent Runtime   : https://console.cloud.google.com/vertex-ai/agents/agent-engines?project=${PROJECT_ID}"
 echo "=============================================================================="

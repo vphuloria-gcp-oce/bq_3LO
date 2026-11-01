@@ -422,6 +422,72 @@ def ensure_ge_oauth_authorization(
     return ""
 
 
+def bind_agent_identity(
+    project_id: str,
+    agent_runtime_id: str,
+    token: str,
+) -> str:
+    """
+    Inspects the deployed Reasoning Engine's `spec.effectiveIdentity` (SPIFFE principal)
+    and ensures Plane 1 least-privilege IAM roles are bound on the project (with zero BigQuery roles).
+    """
+    parts = agent_runtime_id.strip("/").split("/")
+    region = parts[3] if len(parts) >= 4 and parts[2] == "locations" else "us-central1"
+    re_url = f"https://{region}-aiplatform.googleapis.com/v1beta1/{agent_runtime_id}"
+    status, data = api_request("GET", re_url, token, project_id)
+    if status != 200:
+        print(f"⚠️ Warning fetching Reasoning Engine metadata ({status}): {json.dumps(data)}")
+        return ""
+
+    spec = data.get("spec", {})
+    identity_type = spec.get("identityType", "SERVICE_ACCOUNT")
+    effective_identity = spec.get("effectiveIdentity", "")
+    if not effective_identity:
+        print(f"ℹ️  Reasoning Engine '{agent_runtime_id}' uses identityType={identity_type} (no SPIFFE effectiveIdentity).")
+        return ""
+
+    principal = (
+        effective_identity
+        if effective_identity.startswith("principal://")
+        else f"principal://{effective_identity}"
+    )
+    print(f"🪪 Verified Reasoning Engine Identity Type : {identity_type}")
+    print(f"🔐 SPIFFE Effective Identity Principal    : {principal}")
+
+    plane1_roles = (
+        "roles/aiplatform.user",
+        "roles/logging.logWriter",
+        "roles/telemetry.writer",
+        "roles/monitoring.metricWriter",
+        "roles/serviceusage.serviceUsageConsumer",
+    )
+    crm_base = f"https://cloudresourcemanager.googleapis.com/v1/projects/{project_id}"
+    i_status, policy = api_request("POST", f"{crm_base}:getIamPolicy", token, project_id, {})
+    if i_status != 200:
+        print(f"⚠️ Warning fetching project IAM policy ({i_status})")
+        return principal
+
+    changed = False
+    for role in plane1_roles:
+        binding = next((b for b in policy.get("bindings", []) if b.get("role") == role), None)
+        if binding is None:
+            policy.setdefault("bindings", []).append({"role": role, "members": [principal]})
+            changed = True
+        elif principal not in binding.get("members", []):
+            binding.setdefault("members", []).append(principal)
+            changed = True
+
+    if changed:
+        s_status, s_data = api_request("POST", f"{crm_base}:setIamPolicy", token, project_id, {"policy": policy})
+        if s_status == 200:
+            print(f"✅ Granted Plane 1 least-privilege IAM roles ({', '.join(plane1_roles)}) to {principal}")
+        else:
+            print(f"⚠️ Warning setting Plane 1 IAM policy ({s_status}): {json.dumps(s_data)}")
+    else:
+        print(f"✅ Verified Plane 1 least-privilege IAM roles already bound to {principal}")
+    return principal
+
+
 def finalize_published_agent(
     project_number: str,
     project_id: str,
@@ -429,6 +495,7 @@ def finalize_published_agent(
     engine_id: str,
     auth_id: str,
     agent_display_name: str,
+    target_agent_runtime_id: str,
     token: str,
 ) -> None:
     engine_res = f"projects/{project_number}/locations/{location}/collections/default_collection/engines/{engine_id}"
@@ -441,30 +508,71 @@ def finalize_published_agent(
     agents_url = f"https://discoveryengine.googleapis.com/v1alpha/{engine_res}/assistants/default_assistant/agents"
     status, agents_data = api_request("GET", agents_url, token, project_id)
     if status == 200:
-        for ag in agents_data.get("agents", []):
-            if ag.get("displayName") == agent_display_name:
-                ag_name = ag["name"]
-                patch_body = {
-                    "displayName": ag.get("displayName", agent_display_name),
-                    "description": ag.get("description", ""),
-                    "adkAgentDefinition": ag.get("adkAgentDefinition", {}),
-                    "sharingConfig": {"scope": "ALL_USERS"},
-                }
-                masks = ["sharingConfig"]
-                if auth_res:
-                    patch_body["authorizationConfig"] = {"toolAuthorizations": [auth_res]}
-                    masks.append("authorizationConfig")
-                p_status, p_data = api_request(
-                    "PATCH",
-                    f"https://discoveryengine.googleapis.com/v1alpha/{ag_name}?updateMask={','.join(masks)}",
-                    token,
-                    project_id,
-                    patch_body,
+        all_agents = agents_data.get("agents", [])
+        matching = [
+            ag for ag in all_agents
+            if ag.get("displayName") == agent_display_name
+            or (
+                auth_res
+                and auth_res in (ag.get("authorizationConfig", {}).get("toolAuthorizations") or [])
+            )
+        ]
+        # Prefer the registration that already points to target_agent_runtime_id; otherwise pick the newest/first
+        chosen = None
+        if target_agent_runtime_id:
+            for ag in matching:
+                re_name = (
+                    ag.get("adkAgentDefinition", {})
+                    .get("provisionedReasoningEngine", {})
+                    .get("reasoningEngine", "")
                 )
-                if p_status == 200:
-                    print(f"   ✅ Agent shared with ALL_USERS & 3LO Auth verified: {ag_name}", file=sys.stderr)
-                else:
-                    print(f"   ⚠️ Warning patching agent ({p_status}): {json.dumps(p_data)}", file=sys.stderr)
+                if re_name == target_agent_runtime_id:
+                    chosen = ag
+                    break
+        if chosen is None and matching:
+            chosen = matching[-1]
+
+        if chosen is not None:
+            ag_name = chosen["name"]
+            adk_def = dict(chosen.get("adkAgentDefinition", {}))
+            if target_agent_runtime_id:
+                adk_def.setdefault("provisionedReasoningEngine", {})["reasoningEngine"] = target_agent_runtime_id
+            patch_body = {
+                "displayName": agent_display_name or chosen.get("displayName", ""),
+                "description": chosen.get("description", ""),
+                "adkAgentDefinition": adk_def,
+                "sharingConfig": {"scope": "ALL_USERS"},
+            }
+            masks = [" displayName".strip(), "sharingConfig", "adkAgentDefinition"]
+            if auth_res:
+                patch_body["authorizationConfig"] = {"toolAuthorizations": [auth_res]}
+                masks.append("authorizationConfig")
+            p_status, p_data = api_request(
+                "PATCH",
+                f"https://discoveryengine.googleapis.com/v1alpha/{ag_name}?updateMask={','.join(masks)}",
+                token,
+                project_id,
+                patch_body,
+            )
+            if p_status == 200:
+                print(
+                    f"   ✅ Agent shared with ALL_USERS & 3LO Auth verified: {ag_name} -> {target_agent_runtime_id or 'current'}",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"   ⚠️ Warning patching agent ({p_status}): {json.dumps(p_data)}", file=sys.stderr)
+
+            # Remove any duplicate registrations with the same displayName so only 1 active agent exists in GE
+            for dup in matching:
+                if dup["name"] != ag_name:
+                    d_status, _ = api_request(
+                        "DELETE",
+                        f"https://discoveryengine.googleapis.com/v1alpha/{dup['name']}",
+                        token,
+                        project_id,
+                    )
+                    if d_status in (200, 204):
+                        print(f"   🧹 Removed duplicate GE agent registration: {dup['name']}", file=sys.stderr)
 
     widget_url = f"https://discoveryengine.googleapis.com/v1alpha/{engine_res}/widgetConfigs/default_search_widget_config"
     w_status, w_data = api_request("GET", widget_url, token, project_id)
@@ -474,17 +582,27 @@ def finalize_published_agent(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Provision Gemini Enterprise App, Licenses, 3LO Auth, and Agent Sharing."
+        description="Provision Gemini Enterprise App, Licenses, 3LO Auth, Agent Identity IAM, and Agent Sharing."
     )
     parser.add_argument("--prepare", action="store_true", help="Run pre-deploy setup (default mode)")
+    parser.add_argument(
+        "--bind-agent-identity",
+        default="",
+        help="Verify/bind Plane 1 SPIFFE Agent Identity IAM roles for the given Reasoning Engine resource name",
+    )
     parser.add_argument(
         "--finalize-agent-display-name",
         default="",
         help="Post-publish mode: patch ALL_USERS sharing + 3LO auth on agent and print Web App URL",
     )
+    parser.add_argument(
+        "--agent-runtime-id",
+        default="",
+        help="Optional Reasoning Engine resource name to bind in Gemini Enterprise during finalize",
+    )
     parser.add_argument("--project-id", required=True, help="GCP Project ID")
     parser.add_argument("--location", default="global", help="Discovery Engine location (default: global)")
-    parser.add_argument("--engine-id", required=True, help="Gemini Enterprise App Engine ID")
+    parser.add_argument("--engine-id", default="omni-retail-sales-ge", help="Gemini Enterprise App Engine ID")
     parser.add_argument("--display-name", default="OmniRetail 3LO Sales Assistant", help="Gemini Enterprise App Display Name")
     parser.add_argument("--user-emails", default="", help="Comma-separated user emails to license and grant access")
     parser.add_argument("--auth-id", default="bq-3lo-auth", help="Discovery Engine OAuth Authorization ID")
@@ -505,6 +623,14 @@ def main() -> None:
     token = get_access_token()
     project_number = get_project_number(args.project_id, token)
 
+    if args.bind_agent_identity:
+        bind_agent_identity(
+            project_id=args.project_id,
+            agent_runtime_id=args.bind_agent_identity,
+            token=token,
+        )
+        return
+
     if args.finalize_agent_display_name:
         finalize_published_agent(
             project_number=project_number,
@@ -513,6 +639,7 @@ def main() -> None:
             engine_id=args.engine_id,
             auth_id=args.auth_id,
             agent_display_name=args.finalize_agent_display_name,
+            target_agent_runtime_id=args.agent_runtime_id,
             token=token,
         )
         return

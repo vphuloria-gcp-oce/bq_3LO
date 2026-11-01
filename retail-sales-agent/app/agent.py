@@ -83,7 +83,7 @@ def _extract_token(val: object) -> Optional[str]:
 async def _hybrid_3lo_get_valid_credentials(
     self: GoogleCredentialsManager, tool_context: ToolContext
 ) -> Optional[google.auth.credentials.Credentials]:
-    """Resolves user OAuth credentials across Gemini Enterprise 3LO, local dev ADC, and ADK Web."""
+    """Resolves user OAuth credentials across Gemini Enterprise 3LO, Custom Frontends, local dev ADC, and ADK Web."""
     auth_id = SETTINGS["GEMINI_AUTH_ID"]
     state_dict = (
         tool_context.state.to_dict()
@@ -91,8 +91,17 @@ async def _hybrid_3lo_get_valid_credentials(
         else dict(tool_context.state)
     )
 
-    # 1. Gemini Enterprise 3LO: user's OAuth access token is injected into tool_context.state under AUTH_ID
-    for key in (auth_id, f"temp:{auth_id}"):
+    # 1. Gemini Enterprise 3LO & Custom Frontend Token Injection:
+    #    - Gemini Enterprise injects the user's OAuth token under AUTH_ID (or .../authorizations/AUTH_ID).
+    #    - Custom frontends can pass the user's 3LO token in session state under AUTH_ID or 'custom_access_token'.
+    candidate_keys = (
+        auth_id,
+        f"temp:{auth_id}",
+        "custom_access_token",
+        "user_access_token",
+        "bq_access_token",
+    )
+    for key in candidate_keys:
         if token := _extract_token(tool_context.state.get(key)):
             return google.oauth2.credentials.Credentials(token=token)
     for key, val in state_dict.items():
@@ -103,7 +112,7 @@ async def _hybrid_3lo_get_valid_credentials(
     if os.environ.get("BQ_FORCE_LOCAL_ADC", "").lower() == "true" or not SETTINGS["OAUTH_CLIENT_ID"]:
         return google.auth.default(scopes=["https://www.googleapis.com/auth/bigquery"])[0]
 
-    # 3. ADK Web / Playground: delegate to ADK's built-in interactive 3LO OAuth consent flow
+    # 3. ADK Web / Custom Frontend Interactive OAuth: delegate to ADK's built-in 3LO OAuth consent flow
     return await _ORIG_GET_VALID_CREDENTIALS(self, tool_context)
 
 
