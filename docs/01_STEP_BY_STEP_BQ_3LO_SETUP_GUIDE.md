@@ -1,7 +1,7 @@
 # Step-by-Step Guide: Setting Up BigQuery 3-Legged OAuth (3LO) & Agent Identity
 
 **Customer Documentation Navigation**:
-[🏠 Repository Hub (`README.md`)](../README.md) · **Guide 1: Step-by-Step 3LO & Agent Identity Setup** · [🏗️ Guide 2: 3LO Architectural Options & 2LO Comparison](02_3LO_ARCHITECTURAL_OPTIONS_AND_2LO_COMPARISON.md) · [🪪 Guide 3: Agent Identity vs. Service Accounts](03_AGENT_IDENTITY_VS_SERVICE_ACCOUNTS.md)
+[🏠 Repository Hub (`README.md`)](../README.md) · **Guide 1: Step-by-Step 3LO Setup** · [🏗️ Guide 2: 3LO Options & 2LO Comparison](02_3LO_ARCHITECTURAL_OPTIONS_AND_2LO_COMPARISON.md) · [🪪 Guide 3: Agent Identity vs. Service Accounts](03_AGENT_IDENTITY_VS_SERVICE_ACCOUNTS.md) · [🔐 Guide 4: Google Auth Platform & Troubleshooting](04_GOOGLE_AUTH_PLATFORM_AND_TROUBLESHOOTING.md) · [🌐 Guide 5: Extending 3LO & Security FAQ](05_EXTENDING_3LO_AND_SECURITY_FAQ.md)
 
 ---
 
@@ -89,16 +89,22 @@ Use this matrix as your architectural blueprint for where and when every piece o
 
 ### Step 1: Verify Customer BigQuery Permissions & RLS (Pre-Existing Data Layer)
 
-Before connecting your agent, verify that your BigQuery project and target dataset enforce least-privilege access for your human users while excluding the agent's machine identity:
+Before connecting your agent, verify that your BigQuery project and target dataset enforce least-privilege access across all **three tiers of BigQuery security** for your human users while excluding the agent's machine identity:
 
-1. **Human End-Users (or Google Groups)**:
-   - **Project Level**: `roles/bigquery.jobUser` (allows the user's 3LO token to submit `SELECT` query jobs in the project).
-   - **Dataset / Table Level**: `roles/bigquery.dataViewer` on your target dataset (e.g., `your_project.your_dataset`; in this repo, the placeholder `retail_sales.weekly_store_sales` table).
-   - **Row-Level Security (Optional / Recommended)**: Any `CREATE ROW ACCESS POLICY` rules granting `roles/bigquery.filteredDataViewer` to users or groups (or dynamic lookup tables keyed by `SESSION_USER()`).
-2. **Agent Machine Identity (Plane 1)**:
+1. **Tier A — Project-Level Compute Permission (`roles/bigquery.jobUser`)**:
+   - Granted to human end-users (or Google Workspace groups) at the project level (`IAM & Admin > IAM`).
+   - Allows the user's 3LO token to spin up serverless `SELECT` query jobs in the compute project, while granting **zero** permission to read any dataset or table.
+2. **Tier B — Dataset / Table Metadata Permission (`roles/bigquery.dataViewer`)**:
+   - Granted on the target dataset or table (`BigQuery Studio > Share > Manage permissions`).
+   - Once Row-Level Security (RLS) is enabled on a table, `roles/bigquery.dataViewer` only grants table schema/metadata visibility—actual row visibility is governed strictly by Row Access Policies.
+3. **Tier C — Storage-Layer Row-Level Security (`CREATE ROW ACCESS POLICY` / `roles/bigquery.filteredDataViewer`)**:
+   - Attaches row-level filter predicates (`FILTER USING (region = 'North')` or dynamic lookup subqueries keyed by `SESSION_USER()`) and automatically binds `roles/bigquery.filteredDataViewer` to each grantee.
+   - **Important — The "Implicit Deny Cliff"**: Creating the **first** Row Access Policy on a BigQuery table immediately revokes implicit row access for all other users (including Project Owners and Data Admins). Always include an explicit `FILTER USING (TRUE)` policy (such as `rls_admin_all_regions`) for your administrators or ETL service principals so they continue to see all rows.
+   - **Storage-Layer Pre-Filtering (Immune to Prompt Injection)**: BigQuery evaluates RLS predicates at the storage scan layer *before* any user SQL `WHERE`, `JOIN`, or aggregation runs. Even if a user prompt-injects the agent into running `SELECT * FROM weekly_store_sales WHERE region = 'South'`, BigQuery intersects `WHERE (region = 'South') AND (region = 'North')` at scan time and returns `0 rows`.
+4. **Agent Machine Identity (Plane 1)**:
    - **Zero BigQuery Roles**: Verify that neither `principal://agents.global...` nor the default Reasoning Engine service agent holds `roles/bigquery.dataViewer` or `roles/bigquery.admin` on your sensitive dataset.
 
-*(In this demo repository, [`deploy/01_setup_bq_and_rls.sh`](../deploy/01_setup_bq_and_rls.sh) provisions the placeholder `retail_sales.weekly_store_sales` table and binds regional RLS policies for placeholder users `uno@`, `dos@`, `tres@`, and `admin@`. For your own tables, skip `01_setup_bq_and_rls.sh` and point `BQ_DATASET` and `BQ_TABLE` in `deploy/config.env` to your existing dataset.)*
+*(In this demo repository, [`deploy/01_setup_bq_and_rls.sh`](../deploy/01_setup_bq_and_rls.sh) provisions the placeholder `retail_sales.weekly_store_sales` table and binds regional RLS policies for placeholder users `uno@`, `dos@`, `tres@`, and `admin@`. For your own tables, skip `01_setup_bq_and_rls.sh` and point `BQ_DATASET` and `BQ_TABLE` in the root `.env` file to your existing dataset.)*
 
 ---
 
@@ -140,7 +146,7 @@ During a 3-Legged OAuth flow, Google's authorization server (`accounts.google.co
 | **2. Gemini Enterprise Web App**<br/>(`DiscoveryEngine Authorization`) | `https://vertexaisearch.cloud.google.com/oauth-redirect` | **Mandatory for Gemini Enterprise (`serverSideOauth2`)**. When a user clicks **Authorize** in the Gemini Enterprise chat UI, Google redirects the authorization code to this exact global endpoint. *(Never use the deprecated `/static/oauth/oauth.html` path.)* |
 | **3. Google Cloud IAM Auth Manager**<br/>(`agentidentity.googleapis.com/v1` `authProviders`) | `https://agentidentitycredentials.googleapis.com/v1/projects/<PROJECT_ID>/locations/<LOCATION>/authProviders/<AUTH_PROVIDER_NAME>/oauthcallback` | **Mandatory when using IAM Auth Manager (`GcpAuthProvider`)** for custom frontends or BigQuery MCP (`https://bigquery.googleapis.com/mcp`). Replace `<PROJECT_ID>`, `<LOCATION>` (e.g., `us-central1`), and `<AUTH_PROVIDER_NAME>` with your Auth Provider's exact resource identifiers. |
 
-6. Click **Create**, then click **Download JSON** and save the downloaded `client_secret_*.json` file into the root of your repository (or export `OAUTH_CLIENT_ID` and `OAUTH_CLIENT_SECRET` in `deploy/config.env`).
+6. Click **Create**, then copy your `Client ID` and `Client Secret` into `OAUTH_CLIENT_ID` and `OAUTH_CLIENT_SECRET` in the root `.env` file (or save the downloaded `client_secret_*.json` file into the root of your repository).
 
 ---
 
@@ -216,7 +222,7 @@ bigquery_toolset = BigQueryToolset(
         compute_project_id=SETTINGS["PROJECT_ID"],
         location=SETTINGS["BQ_LOCATION"],
         application_name="bq-3lo-retail-sales-agent",
-        job_labels={"datacloud": "antigravity"},
+        job_labels={"app": "bq-3lo-agent"},
     ),
     tool_filter=["execute_sql", "get_table_info", "list_dataset_ids", "list_table_ids"],
 )
@@ -478,6 +484,21 @@ sequenceDiagram
    - On every subsequent turn in the same session, the valid `ya29...` token is reused immediately without prompting the user.
    - If the user returns hours or days later after the 1-hour `access_token` has expired, the broker automatically uses the stored `refresh_token` (`access_type=offline`) to mint a fresh `ya29...` token behind the scenes—so **the user never sees the consent screen again** unless they explicitly revoke access in their Google Account settings.
 
+### 3.1 Verifying Per-User Execution & RLS Policies in Cloud Audit Logs
+
+You can prove to security and compliance auditors that the BigQuery engine evaluated the query under the **human user's identity** (not a shared agent service account) by inspecting **Cloud Audit Logs (Data Access Logs)**:
+
+1. Open **Cloud Console -> Logging -> Logs Explorer**: `https://console.cloud.google.com/logs/query?project=<YOUR_PROJECT_ID>`
+2. Run the following query to inspect BigQuery `tableDataRead` events:
+   ```text
+   resource.type="bigquery_dataset"
+   protoPayload.serviceName="bigquery.googleapis.com"
+   protoPayload.metadata.tableDataRead:*
+   ```
+3. Expand the most recent log entry and verify the following two fields inside `protoPayload`:
+   - **`protoPayload.authenticationInfo.principalEmail`**: Shows the human end-user's email (e.g., `uno@your-company.com` or `dos@your-company.com`), **never** a shared backend service account.
+   - **`protoPayload.metadata.tableDataRead.rowAccessPolicies`**: Lists the exact BigQuery Row-Level Access Policy evaluated during the storage scan (e.g., `projects/<YOUR_PROJECT_ID>/datasets/retail_sales/tables/weekly_store_sales/rowAccessPolicies/rls_north_region`).
+
 ---
 
 ## 4. Caveats & How to Adapt for Other Scenarios
@@ -485,11 +506,11 @@ sequenceDiagram
 ### 4.1 Numeric `GOOGLE_CLOUD_PROJECT` Inside Vertex AI Agent Runtime Containers
 
 > [!WARNING]
-> **Critical Runtime Pitfall**: Inside a deployed Vertex AI Agent Runtime (Reasoning Engine) container, Google Cloud automatically sets the environment variable `GOOGLE_CLOUD_PROJECT` to the **numeric project number** (e.g., `727735722177`) rather than the **alphanumeric project ID** (e.g., `bq-3lo`).
+> **Critical Runtime Pitfall**: Inside a deployed Vertex AI Agent Runtime (Reasoning Engine) container, Google Cloud automatically sets the environment variable `GOOGLE_CLOUD_PROJECT` to the **numeric project number** (e.g., `123456789012`) rather than the **alphanumeric project ID** (e.g., `your-gcp-project-id`).
 
-- **Why It Matters**: If your agent prompt or SQL generator interpolates `os.environ["GOOGLE_CLOUD_PROJECT"]` into a fully qualified BigQuery table name (e.g., ``SELECT * FROM `727735722177.retail_sales.weekly_store_sales` ``), BigQuery table resolution or RLS metadata checks may fail or confuse the LLM.
+- **Why It Matters**: If your agent prompt or SQL generator interpolates `os.environ["GOOGLE_CLOUD_PROJECT"]` into a fully qualified BigQuery table name (e.g., ``SELECT * FROM `123456789012.retail_sales.weekly_store_sales` ``), BigQuery table resolution or RLS metadata checks may fail or confuse the LLM.
 - **How [`app/agent.py`](../retail-sales-agent/app/agent.py) Prevents It**:
-  Lines 42–47 of [`app/agent.py`](../retail-sales-agent/app/agent.py) explicitly check `if env_proj.isdigit(): env_proj = ""` and load the alphanumeric `PROJECT_ID` from packaged `app/oauth_config.json` (or `BQ_PROJECT_ID`). Always pass an explicit alphanumeric `BQ_PROJECT_ID` when constructing SQL table references and `BigQueryToolConfig(compute_project_id=...)`.
+  [`app/agent.py`](../retail-sales-agent/app/agent.py) explicitly checks `if env_proj.isdigit(): env_proj = ""` and resolves the alphanumeric `PROJECT_ID` from `BQ_PROJECT_ID` (passed at container deployment via `--set-env-vars` / `env_vars` from the root `.env` file). Always pass an explicit alphanumeric `BQ_PROJECT_ID` when constructing SQL table references and `BigQueryToolConfig(compute_project_id=...)`.
 
 ### 4.2 Multi-User Licensing, `AclConfig` (`idpType=GSUITE`), and `sharingConfig: ALL_USERS` in Gemini Enterprise
 

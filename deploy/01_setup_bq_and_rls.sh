@@ -21,7 +21,7 @@ echo "==========================================================================
 
 # 1. Verify active authentication and set project
 verify_gcloud_auth
-gcloud config set project "${PROJECT_ID}" --quiet
+gcloud config set project "${PROJECT_ID}" --quiet >/dev/null 2>&1 || true
 gcloud auth application-default set-quota-project "${PROJECT_ID}" --quiet >/dev/null 2>&1 || true
 
 # 2. Generate synthetic data if not already generated
@@ -38,82 +38,129 @@ gcloud services enable \
   iam.googleapis.com \
   --project="${PROJECT_ID}" --quiet
 
-# 4. Create BigQuery Dataset (idempotent)
-echo "📁 Ensuring BigQuery dataset '${PROJECT_ID}:${BQ_DATASET}' exists in ${BQ_LOCATION}..."
-if ! bq --project_id="${PROJECT_ID}" show --dataset "${PROJECT_ID}:${BQ_DATASET}" >/dev/null 2>&1; then
-  bq --location="${BQ_LOCATION}" --project_id="${PROJECT_ID}" mk \
-    --dataset \
-    --label datacloud:antigravity \
-    --description="Retail Store Weekly Sales Dataset for 3-Legged OAuth (3LO) and Row-Level Security (RLS) Demo" \
-    "${PROJECT_ID}:${BQ_DATASET}"
-else
-  echo "   ✅ Dataset ${PROJECT_ID}:${BQ_DATASET} already exists."
-fi
-
-# 5. Upload Synthetic Data into BigQuery Table
-echo "📤 Uploading 45 synthetic weekly store sales rows to '${PROJECT_ID}:${BQ_DATASET}.${BQ_TABLE}'..."
-bq --location="${BQ_LOCATION}" --project_id="${PROJECT_ID}" load \
-  --replace \
-  --source_format=CSV \
-  --skip_leading_rows=1 \
-  --label datacloud:antigravity \
-  "${PROJECT_ID}:${BQ_DATASET}.${BQ_TABLE}" \
-  "${REPO_ROOT}/data/weekly_store_sales.csv" \
-  "${REPO_ROOT}/data/weekly_store_sales_schema.json"
-
-# 6. Grant Project IAM Role (roles/bigquery.jobUser) to Regional Users (uno, dos, tres)
-echo "🔐 Granting roles/bigquery.jobUser to regional users..."
-for REGIONAL_EMAIL in "${NORTH_USER}" "${SOUTH_USER}" "${WEST_USER}"; do
-  echo "   • Binding roles/bigquery.jobUser for user:${REGIONAL_EMAIL}..."
-  gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
-    --member="user:${REGIONAL_EMAIL}" \
+# 4. Grant Project IAM Role (roles/bigquery.jobUser) per valid user
+echo "🔐 Granting roles/bigquery.jobUser to configured users..."
+VALID_USERS=()
+for EMAIL in "${ADMIN_USER}" "${NORTH_USER}" "${SOUTH_USER}" "${WEST_USER}"; do
+  [[ -z "${EMAIL}" ]] && continue
+  if [[ " ${VALID_USERS[*]:-} " == *" ${EMAIL} "* ]]; then
+    continue
+  fi
+  echo "   • Binding roles/bigquery.jobUser for user:${EMAIL}..."
+  if gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+    --member="user:${EMAIL}" \
     --role="roles/bigquery.jobUser" \
     --condition=None \
-    --quiet >/dev/null
+    --quiet >/dev/null 2>&1; then
+    VALID_USERS+=("${EMAIL}")
+  else
+    echo "   ⚠️  Skipping '${EMAIL}' (account does not exist in Cloud Identity / Google Workspace)."
+  fi
 done
 
-# 7. Attach Dataset Viewer Access & Row-Level Access Control (RLS) Policies via BigQuery SQL DCL/DDL
-# Note: CREATE OR REPLACE ROW ACCESS POLICY automatically grants roles/bigquery.filteredDataViewer
-# to each grantee on the table, while GRANT `roles/bigquery.dataViewer` ON SCHEMA grants dataset read access.
-echo "🛡️  Granting Dataset Viewer access & attaching Row-Level Access Policies (RLS) on '${PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}'..."
-read -r -d '' RLS_DDL <<EOF || true
-/* 0. Dataset-level Data Viewer access for all demo personas */
-GRANT \`roles/bigquery.dataViewer\`
-ON SCHEMA \`${PROJECT_ID}.${BQ_DATASET}\`
-TO "user:${ADMIN_USER}",
-   "user:${NORTH_USER}",
-   "user:${SOUTH_USER}",
-   "user:${WEST_USER}";
+export VALID_USERS_CSV
+VALID_USERS_CSV="$(IFS=,; echo "${VALID_USERS[*]:-}")"
 
-/* 1. Admin Policy: Full access to all regions (North, South, West) */
-CREATE OR REPLACE ROW ACCESS POLICY rls_admin_all_regions
-ON \`${PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
-GRANT TO ("user:${ADMIN_USER}")
-FILTER USING (TRUE);
+# 5. Provision BigQuery Dataset, Load Synthetic CSV & Attach Row-Level Security (RLS) via Python SDK (ADC)
+VENV_PYTHON="${REPO_ROOT}/retail-sales-agent/.venv/bin/python3"
+if [[ ! -x "${VENV_PYTHON}" ]]; then
+  (cd "${REPO_ROOT}/retail-sales-agent" && uv sync)
+fi
 
-/* 2. North Region Policy: uno@ only sees North stores */
-CREATE OR REPLACE ROW ACCESS POLICY rls_north_region
-ON \`${PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
-GRANT TO ("user:${NORTH_USER}")
-FILTER USING (region = "North");
+"${VENV_PYTHON}" - <<'PY'
+import json
+import os
+from pathlib import Path
+import google.auth
+from google.cloud import bigquery
 
-/* 3. South Region Policy: dos@ only sees South stores */
-CREATE OR REPLACE ROW ACCESS POLICY rls_south_region
-ON \`${PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
-GRANT TO ("user:${SOUTH_USER}")
-FILTER USING (region = "South");
+repo_root = Path(os.environ["REPO_ROOT"])
+project_id = os.environ["PROJECT_ID"]
+dataset_id = os.environ["BQ_DATASET"]
+table_id = os.environ["BQ_TABLE"]
+location = os.environ.get("BQ_LOCATION", "US")
 
-/* 4. West Region Policy: tres@ only sees West stores */
-CREATE OR REPLACE ROW ACCESS POLICY rls_west_region
-ON \`${PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
-GRANT TO ("user:${WEST_USER}")
-FILTER USING (region = "West");
-EOF
+creds, _ = google.auth.default(
+    scopes=["https://www.googleapis.com/auth/cloud-platform"],
+    quota_project_id=project_id,
+)
+client = bigquery.Client(project=project_id, credentials=creds, location=location)
 
-bq --location="${BQ_LOCATION}" --project_id="${PROJECT_ID}" query \
-  --use_legacy_sql=false \
-  --label datacloud:antigravity \
-  "${RLS_DDL}"
+# 1. Create Dataset (idempotent)
+full_dataset_id = f"{project_id}.{dataset_id}"
+print(f"📁 Ensuring BigQuery dataset '{full_dataset_id}' exists in {location}...")
+ds = bigquery.Dataset(full_dataset_id)
+ds.location = location
+ds.description = "Retail Store Weekly Sales Dataset for 3-Legged OAuth (3LO) and Row-Level Security (RLS) Demo"
+ds.labels = {"app": "bq-3lo-agent"}
+client.create_dataset(ds, exists_ok=True)
+print(f"   ✅ Dataset {full_dataset_id} ready.")
+
+# 2. Load 45 synthetic store sales rows from CSV
+full_table_id = f"{full_dataset_id}.{table_id}"
+print(f"📤 Uploading 45 synthetic weekly store sales rows to '{full_table_id}'...")
+schema_raw = json.loads((repo_root / "data" / "weekly_store_sales_schema.json").read_text(encoding="utf-8"))
+schema = [
+    bigquery.SchemaField(
+        col["name"],
+        col["type"],
+        mode=col.get("mode", "NULLABLE"),
+        description=col.get("description", ""),
+    )
+    for col in schema_raw
+]
+job_config = bigquery.LoadJobConfig(
+    schema=schema,
+    skip_leading_rows=1,
+    source_format=bigquery.SourceFormat.CSV,
+    write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+    labels={"app": "bq-3lo-agent"},
+)
+with (repo_root / "data" / "weekly_store_sales.csv").open("rb") as f:
+    load_job = client.load_table_from_file(f, full_table_id, job_config=job_config)
+load_job.result()
+print(f"   ✅ Loaded {client.get_table(full_table_id).num_rows} rows into {full_table_id}.")
+
+# 3. Grant Dataset Viewer & Attach Row Access Policies (RLS)
+valid_users = [u.strip() for u in os.environ.get("VALID_USERS_CSV", "").split(",") if u.strip()]
+admin_u = os.environ.get("ADMIN_USER", "").strip()
+north_u = os.environ.get("NORTH_USER", "").strip()
+south_u = os.environ.get("SOUTH_USER", "").strip()
+west_u = os.environ.get("WEST_USER", "").strip()
+
+stmts = []
+if valid_users:
+    grantees = ", ".join(f'"user:{u}"' for u in valid_users)
+    stmts.append(f"GRANT `roles/bigquery.dataViewer` ON SCHEMA `{full_dataset_id}` TO {grantees};")
+
+if admin_u in valid_users:
+    stmts.append(
+        f'CREATE OR REPLACE ROW ACCESS POLICY rls_admin_all_regions ON `{full_table_id}` '
+        f'GRANT TO ("user:{admin_u}") FILTER USING (TRUE);'
+    )
+if north_u in valid_users:
+    stmts.append(
+        f'CREATE OR REPLACE ROW ACCESS POLICY rls_north_region ON `{full_table_id}` '
+        f'GRANT TO ("user:{north_u}") FILTER USING (region = "North");'
+    )
+if south_u in valid_users:
+    stmts.append(
+        f'CREATE OR REPLACE ROW ACCESS POLICY rls_south_region ON `{full_table_id}` '
+        f'GRANT TO ("user:{south_u}") FILTER USING (region = "South");'
+    )
+if west_u in valid_users:
+    stmts.append(
+        f'CREATE OR REPLACE ROW ACCESS POLICY rls_west_region ON `{full_table_id}` '
+        f'GRANT TO ("user:{west_u}") FILTER USING (region = "West");'
+    )
+
+if stmts:
+    print(f"🛡️  Granting Dataset Viewer access & attaching Row-Level Access Policies (RLS) on '{full_table_id}'...")
+    ddl_sql = "\n".join(stmts)
+    q_job = client.query(ddl_sql, job_config=bigquery.QueryJobConfig(labels={"app": "bq-3lo-agent"}))
+    q_job.result()
+    print("   ✅ Row Access Policies applied.")
+PY
 
 echo "=============================================================================="
 echo "✅ BigQuery Table & Row-Level Access Policies Configured!"

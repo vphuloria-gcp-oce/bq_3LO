@@ -185,7 +185,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Custom Frontend 3LO Client Example for Vertex AI Agent Runtime"
     )
-    parser.add_argument("--project-id", default="bq-3lo", help="GCP Project ID")
+    parser.add_argument("--project-id", default="your-gcp-project-id", help="GCP Project ID")
     parser.add_argument("--location", default="us-central1", help="Agent Runtime region")
     parser.add_argument(
         "--reasoning-engine-id",

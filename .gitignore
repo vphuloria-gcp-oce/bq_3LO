@@ -1,13 +1,23 @@
 # Ignore local environment overrides & credentials
-deploy/config.env
 .env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+deploy/config.env
 *.pem
 *.key
 client_secret*.json
+**/client_secret*.json
 oauth_config.json
 **/oauth_config.json
+deployment_metadata.json
+**/deployment_metadata.json
+docs-internal/.local_backup/
 
 # Build artifacts, Python bytecode & virtual environments
+*.zip
 dist/
 **/dist/
 build/

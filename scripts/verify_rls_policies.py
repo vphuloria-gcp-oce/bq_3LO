@@ -38,29 +38,20 @@ SSL_CTX = _get_ssl_context()
 
 def _gcloud_env() -> dict[str, str]:
     env = os.environ.copy()
-    for key in (
-        "CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE",
-        "CLOUDSDK_CONTEXT_AWARE_USE_ECP_HTTP_PROXY",
-        "CLOUDSDK_CONTEXT_AWARE_USE_MTLS_FOR_GRPC",
-    ):
-        env.setdefault(key, "false")
     env.setdefault("CLOUDSDK_CORE_DISABLE_PROMPTS", "1")
-    metrics = env.get("CLOUDSDK_METRICS_ENVIRONMENT", "")
-    if "datacloud.antigravity" not in metrics:
-        env["CLOUDSDK_METRICS_ENVIRONMENT"] = f"{metrics} datacloud.antigravity".strip()
     return env
 
 
 def load_config() -> dict[str, str]:
     cfg = {
-        "PROJECT_ID": "bq-3lo",
+        "PROJECT_ID": "your-gcp-project-id",
         "BQ_DATASET": "retail_sales",
         "BQ_TABLE": "weekly_store_sales",
-        "USER_DOMAIN": "vphuloria.altostrat.com",
+        "USER_DOMAIN": "your-company.com",
     }
-    cfg_file = REPO_ROOT / "deploy" / "config.env"
+    cfg_file = REPO_ROOT / ".env"
     if not cfg_file.exists():
-        cfg_file = REPO_ROOT / "deploy" / "config.env.example"
+        cfg_file = REPO_ROOT / ".env.example"
     if cfg_file.exists():
         for raw_line in cfg_file.read_text(encoding="utf-8").splitlines():
             line = raw_line.strip().removeprefix("export ").strip()
@@ -125,7 +116,7 @@ def run_bq_query(project_id: str, sql: str, token: str) -> list[dict]:
     env["CLOUDSDK_AUTH_ACCESS_TOKEN"] = token
     cmd = [
         "bq", f"--project_id={project_id}", "query",
-        "--use_legacy_sql=false", "--format=json", "--label", "datacloud:antigravity", sql,
+        "--use_legacy_sql=false", "--format=json", "--label", "app:bq-3lo-agent", sql,
     ]
     res = subprocess.run(cmd, capture_output=True, text=True, env=env, check=True)
     return json.loads(res.stdout.strip()) if res.stdout.strip() else []

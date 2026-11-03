@@ -64,7 +64,7 @@ except ImportError:  # pragma: no cover
     McpToolset = None  # type: ignore[assignment,misc]
 
 
-PROJECT_ID = os.environ.get("BQ_PROJECT_ID") or os.environ.get("GOOGLE_CLOUD_PROJECT") or "bq-3lo"
+PROJECT_ID = os.environ.get("BQ_PROJECT_ID") or os.environ.get("GOOGLE_CLOUD_PROJECT") or "your-gcp-project-id"
 LOCATION = os.environ.get("AUTH_PROVIDER_LOCATION", "us-central1")
 BQ_DATASET = os.environ.get("BQ_DATASET", "retail_sales")
 BQ_TABLE = os.environ.get("BQ_TABLE", "weekly_store_sales")

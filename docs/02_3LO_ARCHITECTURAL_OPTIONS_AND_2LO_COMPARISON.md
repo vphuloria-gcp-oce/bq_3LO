@@ -1,7 +1,7 @@
 # BigQuery 3LO Architectural Options, Dual Consumption & 2LO vs. 3LO Comparison
 
 **Customer Documentation Navigation**:
-[🏠 Repository Hub (`README.md`)](../README.md) · [🛠️ Guide 1: Step-by-Step 3LO & Agent Identity Setup](01_STEP_BY_STEP_BQ_3LO_SETUP_GUIDE.md) · **Guide 2: 3LO Architectural Options & 2LO Comparison** · [🪪 Guide 3: Agent Identity vs. Service Accounts](03_AGENT_IDENTITY_VS_SERVICE_ACCOUNTS.md)
+[🏠 Repository Hub (`README.md`)](../README.md) · [🛠️ Guide 1: Step-by-Step 3LO Setup](01_STEP_BY_STEP_BQ_3LO_SETUP_GUIDE.md) · **Guide 2: 3LO Options & 2LO Comparison** · [🪪 Guide 3: Agent Identity vs. Service Accounts](03_AGENT_IDENTITY_VS_SERVICE_ACCOUNTS.md) · [🔐 Guide 4: Google Auth Platform & Troubleshooting](04_GOOGLE_AUTH_PLATFORM_AND_TROUBLESHOOTING.md) · [🌐 Guide 5: Extending 3LO & Security FAQ](05_EXTENDING_3LO_AND_SECURITY_FAQ.md)
 
 ---
 
@@ -118,13 +118,13 @@ flowchart LR
 When your custom frontend authenticates a user via Google Sign-In / OAuth 2.0 (requesting scope `https://www.googleapis.com/auth/bigquery`), it passes the user's OAuth access token in `state` when creating or updating the Vertex AI Reasoning Engine session:
 
 ```python
-# From scripts/custom_frontend_3lo_client_example.py (Lines 58-91)
+# From scripts/custom_frontend_3lo_client_example.py
 import vertexai
 from vertexai import agent_engines
 
-vertexai.init(project="bq-3lo", location="us-central1")
+vertexai.init(project="your-gcp-project-id", location="us-central1")
 remote_agent = agent_engines.get(
-    "projects/727735722177/locations/us-central1/reasoningEngines/5957886548912373760"
+    "projects/<YOUR_PROJECT_NUMBER>/locations/us-central1/reasoningEngines/<YOUR_ENGINE_ID>"
 )
 
 # 1. Create a session for the logged-in human user and inject their 3LO token into state

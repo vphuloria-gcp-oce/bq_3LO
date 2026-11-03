@@ -50,16 +50,7 @@ SSL_CTX = _get_ssl_context()
 
 def _gcloud_env() -> dict[str, str]:
     env = os.environ.copy()
-    for key in (
-        "CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE",
-        "CLOUDSDK_CONTEXT_AWARE_USE_ECP_HTTP_PROXY",
-        "CLOUDSDK_CONTEXT_AWARE_USE_MTLS_FOR_GRPC",
-    ):
-        env.setdefault(key, "false")
     env.setdefault("CLOUDSDK_CORE_DISABLE_PROMPTS", "1")
-    metrics = env.get("CLOUDSDK_METRICS_ENVIRONMENT", "")
-    if "datacloud.antigravity" not in metrics:
-        env["CLOUDSDK_METRICS_ENVIRONMENT"] = f"{metrics} datacloud.antigravity".strip()
     return env
 
 
@@ -252,6 +243,28 @@ def ensure_ge_user_access(
         s_status, _ = api_request("POST", f"{crm_base}:setIamPolicy", token, project_id, {"policy": policy})
         if s_status == 200:
             print(f"✅ Granted Discovery Engine user & viewer roles to: {', '.join(user_emails)}")
+        else:
+            env = _gcloud_env()
+            env["CLOUDSDK_AUTH_ACCESS_TOKEN"] = token
+            valid_bound = []
+            for email in user_emails:
+                ok = True
+                for role in ("roles/discoveryengine.user", "roles/discoveryengine.viewer"):
+                    res = subprocess.run(
+                        [
+                            "gcloud", "projects", "add-iam-policy-binding", project_id,
+                            f"--member=user:{email}", f"--role={role}", "--condition=None", "--quiet",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        env=env,
+                    )
+                    if res.returncode != 0:
+                        ok = False
+                if ok:
+                    valid_bound.append(email)
+            if valid_bound:
+                print(f"✅ Granted Discovery Engine user & viewer roles to valid accounts: {', '.join(valid_bound)}")
     else:
         print(f"✅ Verified Discovery Engine user & viewer roles for: {', '.join(user_emails)}")
 
@@ -414,10 +427,18 @@ def ensure_ge_oauth_authorization(
         print(f"⚠️ Warning updating Authorization ({status}): {json.dumps(data)}")
         return auth_res
 
-    status, data = api_request("POST", f"{loc_base}/authorizations?authorizationId={auth_id}", token, project_id, payload)
-    if status in (200, 201):
-        print(f"✅ Created OAuth Authorization: {auth_res}")
-        return auth_res
+    for attempt in range(6):
+        status, data = api_request(
+            "POST", f"{loc_base}/authorizations?authorizationId={auth_id}", token, project_id, payload
+        )
+        if status in (200, 201):
+            print(f"✅ Created OAuth Authorization: {auth_res}")
+            return auth_res
+        if status == 400 and "Authorization is not ready" in json.dumps(data) and attempt < 5:
+            print(f"⏳ Discovery Engine Authorization backend warming up on new project (retry {attempt + 1}/5 in 15s)...")
+            time.sleep(15)
+            continue
+        break
     print(f"⚠️ Warning creating OAuth Authorization ({status}): {json.dumps(data)}")
     return ""
 
@@ -488,38 +509,38 @@ def bind_agent_identity(
 
     # Also ensure the 3LO Auth Provider ('bq-oauth-provider') is registered in IAM Auth Manager
     # with --workload-ids bound to this SPIFFE principal so it appears in the Console Identity tab.
-    oauth_cfg_path = REPO_ROOT / "retail-sales-agent" / "app" / "oauth_config.json"
-    if oauth_cfg_path.exists():
-        try:
-            oauth_cfg = json.loads(oauth_cfg_path.read_text(encoding="utf-8"))
-            c_id = oauth_cfg.get("OAUTH_CLIENT_ID", "")
-            c_secret = oauth_cfg.get("OAUTH_CLIENT_SECRET", "")
-            if c_id and c_secret:
-                env = _gcloud_env()
-                env["CLOUDSDK_AUTH_ACCESS_TOKEN"] = token
-                for loc in ("global", region):
-                    check_url = f"https://agentidentity.googleapis.com/v1alpha/projects/{project_id}/locations/{loc}/authProviders/bq-oauth-provider"
-                    if api_request("GET", check_url, token, project_id)[0] != 200:
-                        subprocess.run(
-                            [
-                                "gcloud", "alpha", "agent-identity", "auth-providers", "create", "bq-oauth-provider",
-                                f"--location={loc}", f"--project={project_id}",
-                                "--description=BigQuery 3-Legged OAuth (3LO) Provider for Retail Sales Agent",
-                                "--three-legged-oauth-authorization-url=https://accounts.google.com/o/oauth2/v2/auth",
-                                "--three-legged-oauth-token-url=https://oauth2.googleapis.com/token",
-                                f"--three-legged-oauth-client-id={c_id}",
-                                f"--three-legged-oauth-client-secret={c_secret}",
-                                "--three-legged-oauth-enable-pkce",
-                                "--allowed-scopes=https://www.googleapis.com/auth/bigquery",
-                                f"--workload-ids={principal}",
-                            ],
-                            capture_output=True,
-                            text=True,
-                            env=env,
-                        )
-                print(f"✅ Registered 3LO Auth Provider 'bq-oauth-provider' on Agent Engine Identity tab for {principal}")
-        except Exception as exc:
-            print(f"⚠️ Warning registering Auth Provider in Agent Identity tab: {exc}")
+    try:
+        c_id, c_secret = discover_oauth_credentials(
+            os.environ.get("OAUTH_CLIENT_ID", ""),
+            os.environ.get("OAUTH_CLIENT_SECRET", ""),
+            project_id,
+        )
+        if c_id and c_secret:
+            env = _gcloud_env()
+            env["CLOUDSDK_AUTH_ACCESS_TOKEN"] = token
+            for loc in ("global", region):
+                check_url = f"https://agentidentity.googleapis.com/v1alpha/projects/{project_id}/locations/{loc}/authProviders/bq-oauth-provider"
+                if api_request("GET", check_url, token, project_id)[0] != 200:
+                    subprocess.run(
+                        [
+                            "gcloud", "alpha", "agent-identity", "auth-providers", "create", "bq-oauth-provider",
+                            f"--location={loc}", f"--project={project_id}",
+                            "--description=BigQuery 3-Legged OAuth (3LO) Provider for Retail Sales Agent",
+                            "--three-legged-oauth-authorization-url=https://accounts.google.com/o/oauth2/v2/auth",
+                            "--three-legged-oauth-token-url=https://oauth2.googleapis.com/token",
+                            f"--three-legged-oauth-client-id={c_id}",
+                            f"--three-legged-oauth-client-secret={c_secret}",
+                            "--three-legged-oauth-enable-pkce",
+                            "--allowed-scopes=https://www.googleapis.com/auth/bigquery",
+                            f"--workload-ids={principal}",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        env=env,
+                    )
+            print(f"✅ Registered 3LO Auth Provider 'bq-oauth-provider' on Agent Engine Identity tab for {principal}")
+    except Exception as exc:
+        print(f"⚠️ Warning registering Auth Provider in Agent Identity tab: {exc}")
 
     return principal
 
@@ -540,6 +561,16 @@ def finalize_published_agent(
         cand_auth = f"projects/{project_number}/locations/{location}/authorizations/{auth_id}"
         if api_request("GET", f"https://discoveryengine.googleapis.com/v1alpha/{cand_auth}", token, project_id)[0] == 200:
             auth_res = cand_auth
+        else:
+            c_id, c_secret = discover_oauth_credentials(
+                os.environ.get("OAUTH_CLIENT_ID", ""),
+                os.environ.get("OAUTH_CLIENT_SECRET", ""),
+                project_id,
+            )
+            if c_id and c_secret:
+                auth_res = ensure_ge_oauth_authorization(
+                    project_number, project_id, location, auth_id, c_id, c_secret, token
+                )
 
     agents_url = f"https://discoveryengine.googleapis.com/v1alpha/{engine_res}/assistants/default_assistant/agents"
     status, agents_data = api_request("GET", agents_url, token, project_id)
@@ -567,6 +598,34 @@ def finalize_published_agent(
                     break
         if chosen is None and matching:
             chosen = matching[-1]
+
+        if chosen is None and target_agent_runtime_id:
+            default_desc = (
+                "Analyzes weekly store sales, margins, returns, and stockouts across regions "
+                "using per-user 3-Legged OAuth (3LO) and BigQuery Row-Level Security (RLS)."
+            )
+            create_payload: dict = {
+                "displayName": agent_display_name or "OmniRetail BigQuery 3LO Sales Agent",
+                "description": default_desc,
+                "icon": {
+                    "uri": "https://fonts.gstatic.com/s/i/short-term/release/googlesymbols/smart_toy/default/24px.svg"
+                },
+                "adkAgentDefinition": {
+                    "toolSettings": {"toolDescription": default_desc},
+                    "provisionedReasoningEngine": {"reasoningEngine": target_agent_runtime_id},
+                },
+            }
+            if auth_res:
+                create_payload["authorizationConfig"] = {"toolAuthorizations": [auth_res]}
+            c_status, c_data = api_request("POST", agents_url, token, project_id, create_payload)
+            if c_status in (200, 201) and "name" in c_data:
+                chosen = c_data
+                print(
+                    f"   ✅ Registered ADK Agent in Gemini Enterprise via REST API: {c_data['name']}",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"   ⚠️ Warning creating GE agent registration ({c_status}): {json.dumps(c_data)}", file=sys.stderr)
 
         if chosen is not None:
             ag_name = chosen["name"]
@@ -649,8 +708,8 @@ def main() -> None:
     parser.add_argument("--oauth-client-secret", default="", help="Optional OAuth 2.0 Client Secret")
     parser.add_argument(
         "--agent-oauth-config",
-        default=str(REPO_ROOT / "retail-sales-agent" / "app" / "oauth_config.json"),
-        help="Path to write packaged oauth_config.json for Agent Runtime",
+        default="",
+        help="Optional legacy path to write oauth_config.json",
     )
     parser.add_argument("--output-json", default="", help="Optional path to write metadata JSON")
     parser.add_argument("--output-env", default="", help="Optional path to write sourceable bash variables")

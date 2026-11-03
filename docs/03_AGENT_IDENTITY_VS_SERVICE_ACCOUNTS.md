@@ -1,13 +1,13 @@
 # Agent Identity (`AGENT_IDENTITY`) vs. Service Accounts: Architectural Guide & Mental Model Shift
 
 **Customer Documentation Navigation**:
-[🏠 Repository Hub (`README.md`)](../README.md) · [🛠️ Guide 1: Step-by-Step 3LO & Agent Identity Setup](01_STEP_BY_STEP_BQ_3LO_SETUP_GUIDE.md) · [🏗️ Guide 2: 3LO Architectural Options & 2LO Comparison](02_3LO_ARCHITECTURAL_OPTIONS_AND_2LO_COMPARISON.md) · **Guide 3: Agent Identity vs. Service Accounts**
+[🏠 Repository Hub (`README.md`)](../README.md) · [🛠️ Guide 1: Step-by-Step 3LO Setup](01_STEP_BY_STEP_BQ_3LO_SETUP_GUIDE.md) · [🏗️ Guide 2: 3LO Options & 2LO Comparison](02_3LO_ARCHITECTURAL_OPTIONS_AND_2LO_COMPARISON.md) · **Guide 3: Agent Identity vs. Service Accounts** · [🔐 Guide 4: Google Auth Platform & Troubleshooting](04_GOOGLE_AUTH_PLATFORM_AND_TROUBLESHOOTING.md) · [🌐 Guide 5: Extending 3LO & Security FAQ](05_EXTENDING_3LO_AND_SECURITY_FAQ.md)
 
 ---
 
 As enterprises scale from a single prototype AI agent to dozens or hundreds of specialized agents running on **Vertex AI Agent Runtime (Agent Engine)**, traditional IAM Service Accounts quickly become an operational bottleneck and a "confused deputy" security risk.
 
-This guide explains **Google Cloud Agent Identity (`AGENT_IDENTITY`)**, compares it across 8 security and operational dimensions against traditional Service Accounts, and walks through the **5 critical mental-model shifts** every Cloud Architect and DevOps team must know before deploying.
+This guide explains **Google Cloud Agent Identity (`AGENT_IDENTITY`)**, compares it across 8 security and operational dimensions against traditional Service Accounts, shows how to inspect it in the Cloud Console `Identity` tab, and walks through the **5 critical mental-model shifts** every Cloud Architect and DevOps team must know before deploying.
 
 ---
 
@@ -23,12 +23,12 @@ Every Reasoning Engine deployed with `AGENT_IDENTITY` receives a globally unique
 principal://agents.global.org-<ORG_ID>.system.id.goog/resources/aiplatform/projects/<PROJECT_NUMBER>/locations/<REGION>/reasoningEngines/<ENGINE_ID>
 ```
 
-| Segment | Meaning | Example Value in This Repo |
+| Segment | Meaning | Example Value |
 | :--- | :--- | :--- |
-| `agents.global.org-<ORG_ID>.system.id.goog` | Organization-scoped Google Cloud Agent Identity trust domain | `agents.global.org-1052266810716.system.id.goog` |
-| `projects/<PROJECT_NUMBER>` | Numeric project number hosting the Reasoning Engine | `projects/727735722177` |
+| `agents.global.org-<ORG_ID>.system.id.goog` | Organization-scoped Google Cloud Agent Identity trust domain | `agents.global.org-123456789012.system.id.goog` |
+| `projects/<PROJECT_NUMBER>` | Numeric project number hosting the Reasoning Engine | `projects/987654321098` |
 | `locations/<REGION>` | Vertex AI deployment region | `locations/us-central1` |
-| `reasoningEngines/<ENGINE_ID>` | Unique Reasoning Engine resource ID | `reasoningEngines/5957886548912373760` |
+| `reasoningEngines/<ENGINE_ID>` | Unique Reasoning Engine resource ID | `reasoningEngines/1122334455667788990` |
 
 ### How `AGENT_IDENTITY` Is Enabled in This Repository
 
@@ -51,13 +51,27 @@ principal://agents.global.org-<ORG_ID>.system.id.goog/resources/aiplatform/proje
    When you inspect the deployed Reasoning Engine resource (`GET https://us-central1-aiplatform.googleapis.com/v1beta1/projects/<PROJECT_NUMBER>/locations/us-central1/reasoningEngines/<ENGINE_ID>`), Vertex AI returns both `identityType` and `effectiveIdentity`:
    ```json
    {
-     "name": "projects/727735722177/locations/us-central1/reasoningEngines/5957886548912373760",
+     "name": "projects/987654321098/locations/us-central1/reasoningEngines/1122334455667788990",
      "spec": {
        "identityType": "AGENT_IDENTITY",
-       "effectiveIdentity": "agents.global.org-1052266810716.system.id.goog/resources/aiplatform/projects/727735722177/locations/us-central1/reasoningEngines/5957886548912373760"
+       "effectiveIdentity": "agents.global.org-123456789012.system.id.goog/resources/aiplatform/projects/987654321098/locations/us-central1/reasoningEngines/1122334455667788990"
      }
    }
    ```
+
+### Inspecting `AGENT_IDENTITY`, `Auth Providers`, and `Outbound Bindings` in the Cloud Console UI
+
+Once deployed, open **Vertex AI → Agent Platform → Deployments (Agent Engine)** in the Google Cloud Console (`https://console.cloud.google.com/vertex-ai/agents/agent-engines?project=<YOUR_PROJECT_ID>`), click your deployed agent, and open the **`Identity`** tab:
+
+1. **Top Section — `Agent identity`**:
+   - Displays the agent's full `principal://agents.global.org-<ORG_ID>.system.id.goog/.../reasoningEngines/<ENGINE_ID>` identifier with a one-click **`Copy identity`** button (for granting roles in **IAM & Admin → IAM**) and direct links to the **IAM Policy Analyzer**.
+2. **Middle Section — `Auth Providers`**:
+   - Displays OAuth 2.0 (3LO or 2LO) and API Key providers registered in **Google Cloud IAM Auth Manager (`agentidentity.googleapis.com`)** that are bound to this agent's `--workload-ids` (for example, `bq-oauth-provider`, automatically registered by [`deploy/manage_ge_app.py`](../deploy/manage_ge_app.py)).
+   - **Architectural Note — Why Two 3LO Token Vaults Exist**:
+     - When **Gemini Enterprise** is the chat frontend (Option A), Gemini Enterprise brokers the OAuth consent popup using its own Discovery Engine `Authorization` resource (`authorizations/bq-3lo-auth`) and injects the resulting token into the agent's session state.
+     - When the **agent itself** (Option B via `GcpAuthProviderScheme` in [`app/agent_auth_manager_example.py`](../retail-sales-agent/app/agent_auth_manager_example.py) or an Outbound Binding) initiates 3LO, 2LO, or API-key authentication against an MCP server (`https://bigquery.googleapis.com/mcp`) or external API, it uses the **`Auth Providers`** table shown on this `Identity` tab.
+3. **Bottom Section — `Outbound Bindings`**:
+   - Allows Cloud Administrators to declaratively bind `[This Agent Identity] + [Auth Provider] ➔ [Target MCP Server / Endpoint in Agent Registry]` so the platform automatically injects the right credential when calling registered targets without hardcoding `authProvider` names in application code.
 
 ---
 
@@ -103,7 +117,7 @@ sequenceDiagram
 ### Call-Out 1: Post-Creation IAM Binding Order (The "Chicken-and-Egg" Sequence)
 
 - **With Traditional Service Accounts**: You create the Service Account *first*, grant it IAM roles (`roles/aiplatform.user`, etc.), and *then* deploy the Reasoning Engine referencing `--service-account`.
-- **With `AGENT_IDENTITY`**: The SPIFFE principal (`principal://.../reasoningEngines/<ENGINE_ID>`) includes the randomly generated `<ENGINE_ID>`, which **does not exist until after the Reasoning Engine resource is created**!Furthermore, the newly created identity starts with **zero permissions**—meaning it cannot even call Vertex AI Gemini (`403 PERMISSION_DENIED` on `aiplatform.endpoints.predict`) until you grant it Plane 1 IAM roles.
+- **With `AGENT_IDENTITY`**: The SPIFFE principal (`principal://.../reasoningEngines/<ENGINE_ID>`) includes the randomly generated `<ENGINE_ID>`, which **does not exist until after the Reasoning Engine resource is created**! Furthermore, the newly created identity starts with **zero permissions**—meaning it cannot even call Vertex AI Gemini (`403 PERMISSION_DENIED` on `aiplatform.endpoints.predict`) until you grant it Plane 1 IAM roles.
 - **How This Repo Automates It**:
   Examine [`deploy/02_deploy_agent_and_ge.sh`](../deploy/02_deploy_agent_and_ge.sh) (Lines 62–76) and `bind_agent_identity()` in [`deploy/manage_ge_app.py`](../deploy/manage_ge_app.py) (Lines 425–489):
   1. First, `agents-cli deploy -d agent_runtime --agent-identity` creates the Reasoning Engine and writes its resource name to `deployment_metadata.json`.
@@ -114,6 +128,7 @@ sequenceDiagram
        --bind-agent-identity "${AGENT_RUNTIME_ID}"
      ```
   3. `bind_agent_identity()` queries the Reasoning Engine's `spec.effectiveIdentity` and binds Plane 1 least-privilege roles (`roles/aiplatform.user`, `roles/logging.logWriter`, `roles/telemetry.writer`, `roles/monitoring.metricWriter`, `roles/serviceusage.serviceUsageConsumer`)—with **zero** BigQuery roles.
+  *(Tip: In the Cloud Console **IAM & Admin → IAM** table, you can uncheck **`Include Google-provided role grants`** in the top-right corner to hide platform service agents like `@cloudbuild` and `@cloudservices` and cleanly inspect your human users alongside your `principal://agents.global...` identity.)*
 
 ---
 
@@ -121,7 +136,7 @@ sequenceDiagram
 
 - **The Rule**: `identity_type` (`AGENT_IDENTITY` vs. `SERVICE_ACCOUNT`) is **immutable** once a Reasoning Engine resource is created. You cannot update an existing `SERVICE_ACCOUNT`-based Reasoning Engine in-place to switch it to `AGENT_IDENTITY`.
 - **How to Migrate an Existing Agent**:
-  Deploy a **new** Reasoning Engine instance with `--agent-identity` (using a new `--service-name` or removing `remote_agent_runtime_id` from `deployment_metadata.json`), bind its Plane 1 IAM roles, and update your Gemini Enterprise agent registration (or custom frontend) to point to the new Reasoning Engine ID. *(And if you ever need to roll back instantaneously during a migration, run [`./deploy/rollback_to_baseline.sh`](../deploy/rollback_to_baseline.sh).)*
+  Deploy a **new** Reasoning Engine instance with `--agent-identity` (using a new `--service-name` or removing `remote_agent_runtime_id` from `deployment_metadata.json`), bind its Plane 1 IAM roles, and update your Gemini Enterprise agent registration (or custom frontend) to point to the new Reasoning Engine ID.
 
 ---
 
@@ -174,4 +189,4 @@ flowchart LR
 
 ---
 
-**Return to Hub**: [🏠 Repository Hub (`README.md`)](../README.md) · [🛠️ Guide 1: Step-by-Step 3LO & Agent Identity Setup](01_STEP_BY_STEP_BQ_3LO_SETUP_GUIDE.md) · [🏗️ Guide 2: 3LO Architectural Options & 2LO Comparison](02_3LO_ARCHITECTURAL_OPTIONS_AND_2LO_COMPARISON.md)
+**Next Guide**: [🔐 Guide 4: Google Auth Platform: Branding, Audience, Token Brokers & OAuth Troubleshooting →](04_GOOGLE_AUTH_PLATFORM_AND_TROUBLESHOOTING.md)

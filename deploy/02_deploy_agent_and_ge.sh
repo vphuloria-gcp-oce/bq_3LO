@@ -34,37 +34,39 @@ gcloud services enable \
   cloudbuild.googleapis.com artifactregistry.googleapis.com storage.googleapis.com \
   --project="${PROJECT_ID}" --quiet
 
-# 2. Provision Gemini Enterprise App, Licenses, 3LO Auth & write app/oauth_config.json
+# 2. Provision Gemini Enterprise App, Licenses & 3LO OAuth Authorization
 echo "🏢 Provisioning Gemini Enterprise App, User Licenses & 3LO OAuth Config..."
 GE_ENV_FILE="$(mktemp)"
 trap 'rm -f "${GE_ENV_FILE}"' EXIT
 
 python3 "${DEPLOY_DIR}/manage_ge_app.py" --prepare \
   --project-id "${PROJECT_ID}" --engine-id "${GE_APP_ID}" --display-name "${GE_APP_DISPLAY_NAME}" \
-  --user-emails "${ADMIN_USER},${NORTH_USER},${SOUTH_USER},${WEST_USER}" --auth-id "${GEMINI_AUTH_ID}" \
+  --user-emails "${ADMIN_USER},${NORTH_USER:-},${SOUTH_USER:-},${WEST_USER:-}" --auth-id "${GEMINI_AUTH_ID}" \
   --bq-dataset "${BQ_DATASET}" --bq-table "${BQ_TABLE}" --bq-location "${BQ_LOCATION}" \
   --oauth-client-id "${OAUTH_CLIENT_ID:-}" --oauth-client-secret "${OAUTH_CLIENT_SECRET:-}" \
-  --agent-oauth-config "${AGENT_DIR}/app/oauth_config.json" --output-env "${GE_ENV_FILE}"
+  --output-env "${GE_ENV_FILE}"
 
 # shellcheck disable=SC1090
 source "${GE_ENV_FILE}"
 
 # 3. Verify local ADK import, deploy to Agent Runtime & publish to Gemini Enterprise
-echo "📦 Verifying ADK agent dependencies, deploying & publishing..."
+echo "📦 Syncing & verifying ADK agent dependencies..."
 (
   cd "${AGENT_DIR}"
+  uv sync --quiet || uv sync
   uv run --no-sync python3 -c "import app.fast_api_app; print('   ✅ Local import of app.fast_api_app succeeded!')"
-  uv lock --no-config --default-index https://pypi.org/simple
 
-AGENT_SERVICE_NAME="${AGENT_SERVICE_NAME:-retail-sales-agent-id}"
+  AGENT_SERVICE_NAME="${AGENT_SERVICE_NAME:-retail-sales-agent-id}"
+  RUNTIME_ENV_VARS="BQ_PROJECT_ID=${PROJECT_ID},BQ_DATASET=${BQ_DATASET},BQ_TABLE=${BQ_TABLE},BQ_LOCATION=${BQ_LOCATION},GEMINI_AUTH_ID=${GEMINI_AUTH_ID}"
+  if [[ -n "${OAUTH_CLIENT_ID:-}" && -n "${OAUTH_CLIENT_SECRET:-}" ]]; then
+    RUNTIME_ENV_VARS="${RUNTIME_ENV_VARS},OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID},OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET}"
+  fi
 
-  echo "🚀 Deploying ADK Agent with SPIFFE Agent Identity (--agent-identity) to Vertex AI Agent Runtime (${REGION})..."
-  agents-cli deploy -d agent_runtime \
-    --project "${PROJECT_ID}" \
+  echo "🚀 Deploying ADK Agent with SPIFFE Agent Identity (AGENT_IDENTITY) to Vertex AI Agent Runtime (${REGION})..."
+  uv run --no-sync python3 "${DEPLOY_DIR}/deploy_agent_runtime.py" \
+    --project-id "${PROJECT_ID}" \
     --region "${REGION}" \
-    --service-name "${AGENT_SERVICE_NAME}" \
-    --agent-identity \
-    --no-confirm-project
+    --service-name "${AGENT_SERVICE_NAME}"
 
   AGENT_RUNTIME_ID="$(python3 -c "import json; d=json.load(open('deployment_metadata.json')); print(d.get('remote_agent_runtime_id') or d.get('remote_agent_engine_id'))")"
   echo "   ✅ Deployed Agent Runtime ID (AGENT_IDENTITY): ${AGENT_RUNTIME_ID}"
@@ -74,28 +76,32 @@ AGENT_SERVICE_NAME="${AGENT_SERVICE_NAME:-retail-sales-agent-id}"
     --project-id "${PROJECT_ID}" \
     --bind-agent-identity "${AGENT_RUNTIME_ID}"
 
-  PUBLISH_ARGS=(
-    publish gemini-enterprise --registration-type adk
-    --agent-runtime-id "${AGENT_RUNTIME_ID}" --gemini-enterprise-app-id "${GE_ENGINE_RESOURCE}"
-    --display-name "${AGENT_DISPLAY_NAME}" --description "${AGENT_DESCRIPTION}"
-    --tool-description "${AGENT_DESCRIPTION}" --project-id "${PROJECT_ID}" --project-number "${PROJECT_NUMBER}"
-  )
-  if [[ -n "${GE_AUTH_RESOURCE}" ]]; then
-    PUBLISH_ARGS+=(--authorization-id "${GE_AUTH_RESOURCE}")
+  if [[ "${SKIP_GEMINI_ENTERPRISE:-false}" != "true" ]] && command -v agents-cli >/dev/null 2>&1; then
+    PUBLISH_ARGS=(
+      publish gemini-enterprise --registration-type adk
+      --agent-runtime-id "${AGENT_RUNTIME_ID}" --gemini-enterprise-app-id "${GE_ENGINE_RESOURCE}"
+      --display-name "${AGENT_DISPLAY_NAME}" --description "${AGENT_DESCRIPTION}"
+      --tool-description "${AGENT_DESCRIPTION}" --project-id "${PROJECT_ID}" --project-number "${PROJECT_NUMBER}"
+    )
+    if [[ -n "${GE_AUTH_RESOURCE:-}" ]]; then
+      PUBLISH_ARGS+=(--authorization-id "${GE_AUTH_RESOURCE}")
+    fi
+    echo "🌐 Publishing ADK Agent to Gemini Enterprise..."
+    agents-cli "${PUBLISH_ARGS[@]}" || echo "ℹ️  Updating Gemini Enterprise registration via Discovery Engine REST API..."
   fi
-
-  echo "🌐 Publishing ADK Agent to Gemini Enterprise..."
-  agents-cli "${PUBLISH_ARGS[@]}" || echo "ℹ️  Existing GE agent registration already holds '${GEMINI_AUTH_ID}'; updating Reasoning Engine pointer in-place..."
 )
 
-# 4. Patch Agent Sharing (ALL_USERS) + 3LO Auth, deduplicate GE registrations & print live URL
+# 4. Create/Patch Agent Sharing (ALL_USERS) + 3LO Auth, deduplicate GE registrations & print live URL
 ACTIVE_RUNTIME_ID="$(python3 -c "import json; d=json.load(open('${AGENT_DIR}/deployment_metadata.json')); print(d.get('remote_agent_runtime_id') or d.get('remote_agent_engine_id'))")"
-echo "🔄 Finalizing Agent Sharing (ALL_USERS), 3LO Auth & single-agent registration..."
-GE_WEB_URL="$(python3 "${DEPLOY_DIR}/manage_ge_app.py" \
-  --project-id "${PROJECT_ID}" --engine-id "${GE_APP_ID}" \
-  --auth-id "${GEMINI_AUTH_ID}" \
-  --agent-runtime-id "${ACTIVE_RUNTIME_ID}" \
-  --finalize-agent-display-name "${AGENT_DISPLAY_NAME}")"
+GE_WEB_URL=""
+if [[ "${SKIP_GEMINI_ENTERPRISE:-false}" != "true" ]]; then
+  echo "🔄 Finalizing Gemini Enterprise Agent Registration, Sharing (ALL_USERS) & 3LO Auth..."
+  GE_WEB_URL="$(python3 "${DEPLOY_DIR}/manage_ge_app.py" \
+    --project-id "${PROJECT_ID}" --engine-id "${GE_APP_ID}" \
+    --auth-id "${GEMINI_AUTH_ID}" \
+    --agent-runtime-id "${ACTIVE_RUNTIME_ID}" \
+    --finalize-agent-display-name "${AGENT_DISPLAY_NAME}")"
+fi
 
 echo "=============================================================================="
 echo "✅ ADK Agent (SPIFFE Agent Identity) Deployed & Published to Gemini Enterprise!"

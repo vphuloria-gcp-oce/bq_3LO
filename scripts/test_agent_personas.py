@@ -8,7 +8,7 @@ Gemini Enterprise 3-Legged OAuth token propagation.
 
 Usage:
   (cd retail-sales-agent && uv run --no-sync python3 ../scripts/test_agent_personas.py)
-  (cd retail-sales-agent && uv run --no-sync python3 ../scripts/test_agent_personas.py --account uno@vphuloria.altostrat.com)
+  (cd retail-sales-agent && uv run --no-sync python3 ../scripts/test_agent_personas.py --account uno@your-company.com)
 """
 
 from __future__ import annotations
@@ -26,16 +26,7 @@ sys.path.insert(0, str(REPO_ROOT / "retail-sales-agent"))
 
 def get_oauth_token(account: str | None = None) -> str:
     env = os.environ.copy()
-    for key in (
-        "CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE",
-        "CLOUDSDK_CONTEXT_AWARE_USE_ECP_HTTP_PROXY",
-        "CLOUDSDK_CONTEXT_AWARE_USE_MTLS_FOR_GRPC",
-    ):
-        env.setdefault(key, "false")
     env.setdefault("CLOUDSDK_CORE_DISABLE_PROMPTS", "1")
-    metrics = env.get("CLOUDSDK_METRICS_ENVIRONMENT", "")
-    if "datacloud.antigravity" not in metrics:
-        env["CLOUDSDK_METRICS_ENVIRONMENT"] = f"{metrics} datacloud.antigravity".strip()
 
     if account:
         res = subprocess.run(["gcloud", "auth", "print-access-token", account], capture_output=True, text=True, env=env)
@@ -51,8 +42,6 @@ def get_oauth_token(account: str | None = None) -> str:
 
 
 async def run_agent_with_3lo_token(prompt: str, access_token: str) -> None:
-    os.environ["GOOGLE_API_USE_CLIENT_CERTIFICATE"] = "false"
-    os.environ["GOOGLE_API_USE_MTLS_ENDPOINT"] = "never"
     os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "true")
     os.environ["GOOGLE_CLOUD_LOCATION"] = "global"
 

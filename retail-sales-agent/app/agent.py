@@ -33,18 +33,39 @@ APP_DIR = Path(__file__).resolve().parent
 REPO_ROOT = APP_DIR.parent.parent
 
 
+def _parse_dotenv(dotenv_path: Path) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    if not dotenv_path.exists():
+        return parsed
+    for raw_line in dotenv_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip().removeprefix("export ").strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        parsed[k.strip()] = v.strip().strip("\"'")
+    return parsed
+
+
 def _load_settings() -> dict[str, str]:
-    """Loads BigQuery and 3LO OAuth settings from app/oauth_config.json with env overrides."""
-    cfg_path = APP_DIR / "oauth_config.json"
-    file_cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
+    """Loads BigQuery and 3LO OAuth settings from container env vars or the root .env file."""
+    file_cfg: dict[str, str] = {}
+    for candidate in (REPO_ROOT / ".env", APP_DIR.parent / ".env"):
+        if candidate.exists():
+            file_cfg.update(_parse_dotenv(candidate))
 
     # Vertex AI Reasoning Engine sets GOOGLE_CLOUD_PROJECT to a numeric project number; ignore numeric IDs for SQL.
-    env_proj = os.environ.get("BQ_PROJECT_ID") or os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+    env_proj = (
+        os.environ.get("BQ_PROJECT_ID")
+        or os.environ.get("PROJECT_ID")
+        or file_cfg.get("BQ_PROJECT_ID")
+        or file_cfg.get("PROJECT_ID")
+        or os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+    )
     if env_proj.isdigit() or env_proj == "your-gcp-project-id":
         env_proj = ""
 
     settings = {
-        "PROJECT_ID": os.environ.get("BQ_PROJECT_ID") or file_cfg.get("PROJECT_ID") or env_proj or "bq-3lo",
+        "PROJECT_ID": env_proj or "your-gcp-project-id",
         "BQ_DATASET": os.environ.get("BQ_DATASET") or file_cfg.get("BQ_DATASET") or "retail_sales",
         "BQ_TABLE": os.environ.get("BQ_TABLE") or file_cfg.get("BQ_TABLE") or "weekly_store_sales",
         "BQ_LOCATION": os.environ.get("BQ_LOCATION") or file_cfg.get("BQ_LOCATION") or "US",
@@ -129,7 +150,7 @@ bigquery_toolset = BigQueryToolset(
         compute_project_id=SETTINGS["PROJECT_ID"],
         location=SETTINGS["BQ_LOCATION"],
         application_name="bq-3lo-retail-sales-agent",
-        job_labels={"datacloud": "antigravity"},
+        job_labels={"app": "bq-3lo-agent"},
     ),
     tool_filter=["execute_sql", "get_table_info", "list_dataset_ids", "list_table_ids"],
 )
